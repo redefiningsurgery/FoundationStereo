@@ -6,8 +6,7 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-
-import os,sys
+import os, sys, time
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(f'{code_dir}/../')
 from omegaconf import OmegaConf
@@ -62,26 +61,42 @@ if __name__=="__main__":
   code_dir = os.path.dirname(os.path.realpath(__file__))
   img0 = imageio.imread(args.left_file)
   img1 = imageio.imread(args.right_file)
+  print(f"[PyTorch] original   : img0 {img0.shape}  img1 {img1.shape}")
   scale = args.scale
   assert scale<=1, "scale must be <=1"
   img0 = cv2.resize(img0, fx=scale, fy=scale, dsize=None)
   img1 = cv2.resize(img1, fx=scale, fy=scale, dsize=None)
-  H,W = img0.shape[:2]
+  print(f"[PyTorch] after resize: img0 {img0.shape}  img1 {img1.shape}")
+  
+  H, W = img0.shape[:2]
   img0_ori = img0.copy()
   logging.info(f"img0: {img0.shape}")
 
-  img0 = torch.as_tensor(img0).cuda().float()[None].permute(0,3,1,2)
-  img1 = torch.as_tensor(img1).cuda().float()[None].permute(0,3,1,2)
+  img0 = torch.as_tensor(img0).cuda().float()[None].permute(0, 3, 1, 2)
+  img1 = torch.as_tensor(img1).cuda().float()[None].permute(0, 3, 1, 2)
+  print(f"[PyTorch] tensor NCHW : {img0.shape}") 
+
   padder = InputPadder(img0.shape, divis_by=32, force_square=False)
   img0, img1 = padder.pad(img0, img1)
+  print(f"[PyTorch] tensor NCHW : {img0.shape}") 
 
   with torch.cuda.amp.autocast(True):
+    torch.cuda.synchronize()      # ← start: ensure previous work done
+    t0 = time.perf_counter()      # ← timing start
+
     if not args.hiera:
       disp = model.forward(img0, img1, iters=args.valid_iters, test_mode=True)
     else:
       disp = model.run_hierachical(img0, img1, iters=args.valid_iters, test_mode=True, small_ratio=0.5)
+
+    torch.cuda.synchronize()      # ← stop: wait for GPU
+    t1 = time.perf_counter()      # ← timing end
+
+  print(f"Inference time: {(t1 - t0) * 1e3:.2f} ms  "
+        f"({1 / (t1 - t0):.1f} FPS)")
+
   disp = padder.unpad(disp.float())
-  disp = disp.data.cpu().numpy().reshape(H,W)
+  disp = disp.data.cpu().numpy().reshape(H, W)
   vis = vis_disparity(disp)
   vis = np.concatenate([img0_ori, vis], axis=1)
   imageio.imwrite(f'{args.out_dir}/vis.png', vis)
